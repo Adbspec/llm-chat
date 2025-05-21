@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+streamlit
+transformers
+huggingface_hub
+torch
+python-dotenv
+llama-cpp-python 
