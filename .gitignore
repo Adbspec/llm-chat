@@ -32,6 +32,8 @@ models/
 
 .vscode/
 .idea/
+**/node_modules/
+**/.next/
 
 # OS
 

@@ -10,8 +10,19 @@ from fastapi import Response, status
 from backend.logging_config import logger, LOG_DIR
 from backend.db import SessionLocal, Message
 from backend.model_loader import ModelManager
+from starlette.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
+# --- CORS setup ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],            # or list of allowed origins
+    allow_credentials=True,
+    allow_methods=["*"],            # GET, POST, PUT, DELETE, etc.
+    allow_headers=["*"],            # e.g. ["Authorization", "Content-Type"]
+)
+# -------------------
 
 # ----- Schemas -----
 class LoadRequest(BaseModel):
@@ -42,9 +53,11 @@ class ChatMeta(BaseModel):
     title: str
 
 class ChatMessage(BaseModel):
-    sender: str
-    text: str
+    sender:   str
+    text:     str
     timestamp: datetime
+    model:    str
+    device:   str
 
 # ----- Helper -----
 def get_db():
@@ -53,6 +66,20 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# ----- List Available Models -----
+@app.get("/models", response_model=List[str])
+async def available_models():
+    """
+    Return a list of model names available in the models directory.
+
+    Returns:
+        List[str]: e.g., ['gpt2', 'qwen2.5', 'local-llama']
+    """
+    try:
+        return ModelManager.list_available_models()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ----- Endpoints -----
 @app.get('/status', response_model=StatusResponse)
@@ -81,16 +108,26 @@ async def list_chats():
 
 @app.get('/history', response_model=List[ChatMessage])
 async def get_history(chat_id: str = Query(...)):
-    db: Session = SessionLocal()
-    msgs = (
-        db.query(Message)
-          .filter(Message.chat_id == chat_id)
-          .order_by(Message.id)
-          .all()
-    )
-    out = [ChatMessage(sender=m.sender.capitalize(), text=m.text, timestamp=m.timestamp) for m in msgs]
-    db.close()
-    return out
+    db = SessionLocal()
+    try:
+        msgs = (
+            db.query(Message)
+              .filter(Message.chat_id == chat_id)
+              .order_by(Message.id)
+              .all()
+        )
+        return [
+            ChatMessage(
+                sender=m.sender,
+                text=m.text,
+                timestamp=m.timestamp,
+                model=m.model,
+                device=m.device
+            )
+            for m in msgs
+        ]
+    finally:
+        db.close()
 
 @app.post('/load')
 async def load_model(req: LoadRequest):
@@ -115,44 +152,69 @@ async def chat(
     model: str = Query(...),
     device: str = Query('auto')
 ):
-    # Ensure model is loaded
     if (model, device) not in ModelManager._cache:
         raise HTTPException(status_code=400, detail="Model not loaded")
 
     chat_id = req.chat_id or str(uuid4())
-    log_file = os.path.join(LOG_DIR, f"{chat_id}.log")
-    timestamp = datetime.utcnow().isoformat()
+    # generate…
+    # ──────────────────────────────────────
 
+    # 1) Tokenize
+    # tokenizer, model_obj = ModelManager._cache[(model, device)]
+    # inputs = tokenizer(req.message, return_tensors='pt').to(model_obj.device)
+
+    tokenizer, model_obj = ModelManager._cache[(model, device)]
+    inputs    = tokenizer(req.message, return_tensors='pt').to(model_obj.device)
+    input_ids = inputs["input_ids"]
+    L_in      = input_ids.shape[-1]   
+
+    # 2) Generate
+    start = time.time()
+    outputs = model_obj.generate(**inputs, max_new_tokens=250,
+                                 pad_token_id=tokenizer.eos_token_id,use_cache=False)
+    
+    # 3) Slice off prompt & decode only new tokens
+    gen_ids = outputs[0][L_in:]                  # ← new: drop prompt tokens
+    
+    text    = tokenizer.decode(
+                gen_ids,
+                skip_special_tokens=True
+            ).strip()        
+    
+    # 4) Metrics
+    elapsed = time.time() - start
+    tokens  = outputs.shape[-1]
+    tps     = tokens / elapsed if elapsed > 0 else 0
+    # ──────────────────────────────────────
+
+    
+    db = SessionLocal()
     try:
-        # Log user message with UTF-8 encoding
-        with open(log_file, 'a', encoding='utf-8') as f:
-            f.write(f"{timestamp} | USER ({device}): {req.message}\n")
-        logger.info(f"[{chat_id}] USER ({device}): {req.message}")
+        now = datetime.utcnow()
+        db.add_all([
+            Message(
+                chat_id=chat_id,
+                model=model,
+                device=device,
+                sender='user',
+                text=req.message,
+                timestamp=now
+            ),
+            Message(
+                chat_id=chat_id,
+                model=model,
+                device=device,
+                sender='bot',
+                text=text,
+                timestamp=datetime.utcnow()
+            )
+        ])
+        db.commit()
+    finally:
+        db.close()
 
-        # Generate response
-        tokenizer, model_obj = ModelManager._cache[(model, device)]
-        inputs = tokenizer(req.message, return_tensors='pt').to(model_obj.device)
-        start = time.time()
-        outputs = model_obj.generate(
-            **inputs,
-            max_new_tokens=150,
-            pad_token_id=tokenizer.eos_token_id
-        )
-        text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        elapsed = time.time() - start
-        tokens = outputs.shape[-1]
-        tps = tokens / elapsed if elapsed > 0 else 0
-
-        # Log bot response with UTF-8 encoding
-        with open(log_file, 'a', encoding='utf-8') as f:
-            f.write(f"{datetime.utcnow().isoformat()} | BOT: {text}\n")
-        logger.info(f"[{chat_id}] BOT: {text}")
-
-        return {"response": text, "tokens": int(tokens), "time_s": elapsed, "tps": tps}
-    except Exception as e:
-        logger.exception("Chat error")
-        raise HTTPException(status_code=500, detail=str(e))
-
+    return {"response": text, "tokens": int(tokens),
+            "time_s": elapsed, "tps": tps}
 
 @app.post("/clear_all")
 async def clear_all_messages():

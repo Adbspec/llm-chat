@@ -8,7 +8,7 @@ from datetime import datetime
 # Base API URL (FastAPI backend)
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 
-st.set_page_config(page_title="🦜🔗 Mini ChatGPT", page_icon="🤖")
+st.set_page_config(page_title="🦜🔗 LLM Chat", page_icon="🤖")
 
 # --- 1) Read chat_id from URL once ---
 initial_chat_id = st.query_params.get("chat_id", [None])[0]
@@ -101,7 +101,7 @@ for chat in chats:
             st.session_state.loaded = True
 
 # --- Main Area ---
-st.title("🦜🔗 Mini ChatGPT")
+st.title("🦜🔗 LLM Chat")
 
 # 4) Blank slate
 if not st.session_state.chat_id:

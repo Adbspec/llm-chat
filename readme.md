@@ -184,4 +184,4 @@ mini-chatgpt-app/
 
 ---
 
-Enjoy your self-hosted Mini ChatGPT! 🎉
+Enjoy your self-hosted LLM Chat! 🎉

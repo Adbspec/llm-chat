@@ -12,6 +12,24 @@ class ModelManager:
     _cache = {}
 
     @classmethod
+    def list_available_models(cls) -> list[str]:
+        """
+        Scan the MODELS_DIR and return a list of available model folder names.
+
+        Returns:
+            List[str]  # e.g., ['gpt2', 'qwen2.5', 'local-llama']
+        """
+        try:
+            return [
+                name for name in os.listdir(MODELS_DIR)
+                if os.path.isdir(os.path.join(MODELS_DIR, name))
+            ]
+        except FileNotFoundError:
+            logger.error(f"Models directory not found: {MODELS_DIR}")
+            return []
+        
+
+    @classmethod
     def load_model(cls, model_name: str, device_mode: str = 'auto'):
         """
         Load a model in 'auto', 'cpu', or 'gpu' mode.  
@@ -61,6 +79,12 @@ class ModelManager:
                 torch_dtype=torch.float16,
                 trust_remote_code=True
             )
+
+        model.config.use_memory_efficient_attention = True
+        model.config.xformers                 = True
+
+        # re-enable HF’s key/value caching
+        model.config.use_cache = True
         model.eval()
 
         cls._cache[key] = (tokenizer, model)
